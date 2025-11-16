@@ -1,0 +1,588 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <io.h>
+#define ISATTY _isatty
+#define FILENO _fileno
+#else
+#include <unistd.h>
+#define ISATTY isatty
+#define FILENO fileno
+#endif
+
+#define MAX_NAME 50
+#define MAX_ACTION 100
+#define CAND_FILE "candidates.dat"
+#define VOTER_FILE "voters.dat"
+#define POS_FILE "position.txt"
+#define RESULT_FILE "result.txt"
+#define ADMIN_PASS "admin123"
+
+// ================= STRUCTURESSS ================= //
+typedef struct Candidate {
+    int id;
+    char name[MAX_NAME];
+    int votes;
+    struct Candidate *next;
+} Candidate;
+
+typedef struct Voter {
+    int id;
+    char name[MAX_NAME];
+    int hasVoted;
+    struct Voter *next;
+} Voter;
+
+typedef struct Stack {
+    char action[MAX_ACTION];
+    struct Stack *next;
+} Stack;
+
+// ================= GLOBALS ================= //
+Candidate *headCandidate = NULL;
+Voter *headVoter = NULL;
+Stack *top = NULL;
+char positionName[100] = "";
+
+/* NEW: result persistence globals */
+int resultDeclared = 0;
+int resultWinnerId = -1;
+char resultWinnerName[MAX_NAME] = "";
+int resultWinnerVotes = 0;
+
+// ================= STACK FUNCTIONS ================= //
+void push_action_str(const char action[]) {
+    Stack *newNode = (Stack *)malloc(sizeof(Stack));
+    if (!newNode) return;
+    strncpy(newNode->action, action, MAX_ACTION - 1);
+    newNode->action[MAX_ACTION - 1] = '\0';
+    newNode->next = top;
+    top = newNode;
+}
+
+char *pop_action_str() {
+    if (top == NULL) return NULL;
+    Stack *tmp = top;
+    char *ret = (char *)malloc(strlen(tmp->action) + 1);
+    if (!ret) return NULL;
+    strcpy(ret, tmp->action);
+    top = top->next;
+    free(tmp);
+    return ret;
+}
+
+/* NEW: peek helper for undo */
+char *peek_action_str() {
+    if (top == NULL) return NULL;
+    return top->action;
+}
+
+// ================= FILE HANDLING ================= //
+void savePosition() {
+    FILE *fp = fopen(POS_FILE, "w");
+    if (!fp) return;
+    fprintf(fp, "%s", positionName);
+    fclose(fp);
+}
+
+void loadPosition() {
+    FILE *fp = fopen(POS_FILE, "r");
+    if (!fp) { positionName[0] = '\0'; return; }
+    fgets(positionName, sizeof(positionName), fp);
+    positionName[strcspn(positionName, "\n")] = '\0';
+    fclose(fp);
+}
+
+void saveCandidates() {
+    FILE *fp = fopen(CAND_FILE, "wb");
+    if (!fp) return;
+    int count = 0;
+    for (Candidate *p = headCandidate; p; p = p->next) count++;
+    fwrite(&count, sizeof(int), 1, fp);
+    for (Candidate *p = headCandidate; p; p = p->next) {
+        fwrite(&p->id, sizeof(int), 1, fp);
+        fwrite(p->name, sizeof(char), MAX_NAME, fp);
+        fwrite(&p->votes, sizeof(int), 1, fp);
+    }
+    fclose(fp);
+}
+
+void loadCandidates() {
+    FILE *fp = fopen(CAND_FILE, "rb");
+    if (!fp) { headCandidate = NULL; return; }
+    int count = 0;
+    if (fread(&count, sizeof(int), 1, fp) != 1) { fclose(fp); headCandidate = NULL; return; }
+    Candidate *prev = NULL;
+    headCandidate = NULL;
+    for (int i = 0; i < count; i++) {
+        Candidate *node = (Candidate *)malloc(sizeof(Candidate));
+        if (!node) break;
+        if (fread(&node->id, sizeof(int), 1, fp) != 1) { free(node); break; }
+        if (fread(node->name, sizeof(char), MAX_NAME, fp) != MAX_NAME) { free(node); break; }
+        if (fread(&node->votes, sizeof(int), 1, fp) != 1) { free(node); break; }
+        node->next = NULL;
+        if (!headCandidate) headCandidate = node;
+        else prev->next = node;
+        prev = node;
+    }
+    fclose(fp);
+}
+
+void saveVoters() {
+    FILE *fp = fopen(VOTER_FILE, "wb");
+    if (!fp) return;
+    int count = 0;
+    for (Voter *p = headVoter; p; p = p->next) count++;
+    fwrite(&count, sizeof(int), 1, fp);
+    for (Voter *p = headVoter; p; p = p->next) {
+        fwrite(&p->id, sizeof(int), 1, fp);
+        fwrite(p->name, sizeof(char), MAX_NAME, fp);
+        fwrite(&p->hasVoted, sizeof(int), 1, fp);
+    }
+    fclose(fp);
+}
+
+void loadVoters() {
+    FILE *fp = fopen(VOTER_FILE, "rb");
+    if (!fp) { headVoter = NULL; return; }
+    int count = 0;
+    if (fread(&count, sizeof(int), 1, fp) != 1) { fclose(fp); headVoter = NULL; return; }
+    Voter *prev = NULL;
+    headVoter = NULL;
+    for (int i = 0; i < count; i++) {
+        Voter *node = (Voter *)malloc(sizeof(Voter));
+        if (!node) break;
+        if (fread(&node->id, sizeof(int), 1, fp) != 1) { free(node); break; }
+        if (fread(node->name, sizeof(char), MAX_NAME, fp) != MAX_NAME) { free(node); break; }
+        if (fread(&node->hasVoted, sizeof(int), 1, fp) != 1) { free(node); break; }
+        node->next = NULL;
+        if (!headVoter) headVoter = node;
+        else prev->next = node;
+        prev = node;
+    }
+    fclose(fp);
+}
+
+void freeCandidates() {
+    Candidate *cur = headCandidate;
+    while (cur) { Candidate *tmp = cur; cur = cur->next; free(tmp); }
+    headCandidate = NULL;
+}
+
+void freeVoters() {
+    Voter *cur = headVoter;
+    while (cur) { Voter *tmp = cur; cur = cur->next; free(tmp); }
+    headVoter = NULL;
+}
+
+/* NEW: result file save/load */
+void saveResultToFile() {
+    FILE *fp = fopen(RESULT_FILE, "w");
+    if (!fp) return;
+    fprintf(fp, "DECLARED\n%d\n%s\n%d\n", resultWinnerId, resultWinnerName, resultWinnerVotes);
+    fclose(fp);
+}
+
+void loadResultFromFile() {
+    FILE *fp = fopen(RESULT_FILE, "r");
+    if (!fp) { resultDeclared = 0; return; }
+    char header[32];
+    if (!fgets(header, sizeof(header), fp)) { fclose(fp); resultDeclared = 0; return; }
+    header[strcspn(header, "\n")] = '\0';
+    if (strcmp(header, "DECLARED") == 0) {
+        resultDeclared = 1;
+        if (fscanf(fp, "%d\n", &resultWinnerId) != 1) resultWinnerId = -1;
+        if (!fgets(resultWinnerName, sizeof(resultWinnerName), fp)) resultWinnerName[0] = '\0';
+        else resultWinnerName[strcspn(resultWinnerName, "\n")] = '\0';
+        if (fscanf(fp, "%d\n", &resultWinnerVotes) != 1) resultWinnerVotes = 0;
+    } else {
+        resultDeclared = 0;
+    }
+    fclose(fp);
+}
+
+// ================= NON-INTERACTIVE HELPERS ================= //
+void add_candidate_cli(int id, const char *name) {
+    Candidate *node = (Candidate *)malloc(sizeof(Candidate));
+    if (!node) return;
+    node->id = id;
+    strncpy(node->name, name, MAX_NAME - 1);
+    node->name[MAX_NAME - 1] = '\0';
+    node->votes = 0;
+    node->next = headCandidate;
+    headCandidate = node;
+    push_action_str("candidate");
+    saveCandidates();
+    printf("OK\n");
+}
+
+void add_voter_cli(int id, const char *name) {
+    Voter *node = (Voter *)malloc(sizeof(Voter));
+    if (!node) return;
+    node->id = id;
+    strncpy(node->name, name, MAX_NAME - 1);
+    node->name[MAX_NAME - 1] = '\0';
+    node->hasVoted = 0;
+    node->next = headVoter;
+    headVoter = node;
+    push_action_str("voter");
+    saveVoters();
+    printf("OK\n");
+}
+
+void list_candidates_cli() {
+    for (Candidate *p = headCandidate; p; p = p->next)
+        printf("%d|%s|%d\n", p->id, p->name, p->votes);
+}
+
+void list_voters_cli() {
+    for (Voter *v = headVoter; v; v = v->next)
+        printf("%d|%s|%d\n", v->id, v->name, v->hasVoted);
+}
+
+void set_position_cli(const char *pos) {
+    strncpy(positionName, pos, sizeof(positionName) - 1);
+    positionName[sizeof(positionName) - 1] = '\0';
+    savePosition();
+    printf("OK\n");
+}
+
+void view_results_cli() {
+    /* If result not declared, inform client; in interactive mode allow declaration */
+    loadResultFromFile();
+    if (!resultDeclared) {
+        /* If non-interactive caller (e.g. frontend via --view-results), just inform */
+        if (!ISATTY(FILENO(stdin))) {
+            printf("NOT_DECLARED\n");
+            return;
+        }
+
+        /* interactive: offer to declare now */
+        printf("Results have NOT been declared yet for position: %s\n", positionName[0] ? positionName : "(none)");
+        if (positionName[0] == '\0') {
+            printf("No position set. Please set position first using the Set Position option.\n");
+            return;
+        }
+
+        printf("Do you want to declare result now for position '%s'? (y/n): ", positionName);
+        char resp[8] = {0};
+        if (scanf("%7s", resp) != 1) { printf("Abort.\n"); return; }
+        if (resp[0] == 'y' || resp[0] == 'Y') {
+            if (headCandidate == NULL) {
+                printf("No candidates to declare result for.\n");
+                return;
+            }
+            if (!any_voted()) {
+                printf("No votes have been cast; cannot declare a winner yet.\n");
+                return;
+            }
+            compute_winner_and_save();
+            /* after declaring, fall through to print official result below */
+        } else {
+            printf("Declaration cancelled.\n");
+            return;
+        }
+    }
+
+    /* At this point resultDeclared should be true (either was already declared or just declared) */
+    /* Print winner first then full tally */
+    printf("WINNER|%d|%s|%d\n", resultWinnerId, resultWinnerName, resultWinnerVotes);
+    /* print full tally sorted by votes descending */
+    /* collect into array */
+    int count = 0;
+    for (Candidate *p = headCandidate; p; p = p->next) count++;
+    if (count == 0) { return; }
+    Candidate **arr = (Candidate **)malloc(sizeof(Candidate*) * count);
+    int idx = 0;
+    for (Candidate *p = headCandidate; p; p = p->next) arr[idx++] = p;
+    for (int i = 0; i < count - 1; ++i)
+        for (int j = 0; j < count - i - 1; ++j)
+            if (arr[j]->votes < arr[j+1]->votes) {
+                Candidate *t = arr[j]; arr[j] = arr[j+1]; arr[j+1] = t;
+            }
+    for (int i = 0; i < count; ++i)
+        printf("%d|%s|%d\n", i+1, arr[i]->name, arr[i]->votes);
+    free(arr);
+}
+
+/* NEW: helper to check if any vote cast */
+int any_voted() {
+    Voter *v = headVoter;
+    while (v) { if (v->hasVoted) return 1; v = v->next; }
+    return 0;
+}
+
+/* NEW: compute winner and persist */
+void compute_winner_and_save() {
+    if (headCandidate == NULL) {
+        resultDeclared = 0;
+        resultWinnerId = -1;
+        resultWinnerName[0] = '\0';
+        resultWinnerVotes = 0;
+        return;
+    }
+    Candidate *best = headCandidate;
+    for (Candidate *c = headCandidate; c; c = c->next) {
+        if (c->votes > best->votes) best = c;
+    }
+    resultDeclared = 1;
+    resultWinnerId = best->id;
+    strncpy(resultWinnerName, best->name, MAX_NAME - 1);
+    resultWinnerName[MAX_NAME - 1] = '\0';
+    resultWinnerVotes = best->votes;
+    saveResultToFile();
+}
+
+void declare_result_cli() {
+    if (headCandidate == NULL) {
+        printf("NO_CANDIDATES\n");
+        return;
+    }
+    if (!any_voted()) {
+        printf("NO_VOTES\n");
+        return;
+    }
+    compute_winner_and_save();
+    printf("OK\n");
+}
+
+/* NEW: reset election - REMOVE all candidates, clear voters' hasVoted and persisted result */
+void reset_election_cli() {
+    /* Remove all candidates */
+    Candidate *c = headCandidate;
+    while (c) { Candidate *tmp = c; c = c->next; free(tmp); }
+    headCandidate = NULL;
+
+    /* Reset voters' hasVoted to 0 (do NOT remove voters) */
+    Voter *v = headVoter;
+    while (v) { v->hasVoted = 0; v = v->next; }
+
+    /* clear persisted result */
+    resultDeclared = 0;
+    resultWinnerId = -1;
+    resultWinnerName[0] = '\0';
+    resultWinnerVotes = 0;
+    remove(RESULT_FILE);
+
+    saveCandidates();
+    saveVoters();
+    printf("OK\n");
+}
+
+void undo_cli() {
+    char *act = pop_action_str();
+    if (!act) { printf("NO_ACTION\n"); return; }
+    if (strcmp(act, "candidate") == 0 && headCandidate) {
+        Candidate *tmp = headCandidate;
+        headCandidate = headCandidate->next;
+        free(tmp);
+        saveCandidates();
+        printf("OK\n");
+    } else if (strcmp(act, "voter") == 0 && headVoter) {
+        Voter *tmp = headVoter;
+        headVoter = headVoter->next;
+        free(tmp);
+        saveVoters();
+        printf("OK\n");
+    } else {
+        printf("NO_MATCH\n");
+    }
+    free(act);
+}
+
+void cast_vote_cli(int voterid, int candidateid) {
+    if (!headCandidate) { printf("NO_CANDIDATES\n"); return; }
+    if (strlen(positionName) == 0) { printf("NO_POSITION\n"); return; }
+    Voter *v = headVoter;
+    while (v && v->id != voterid) v = v->next;
+    if (!v) { printf("VOTER_NOT_FOUND\n"); return; }
+    if (v->hasVoted) { printf("ALREADY_VOTED\n"); return; }
+    Candidate *c2 = headCandidate;
+    while (c2) {
+        if (c2->id == candidateid) {
+            c2->votes++;
+            v->hasVoted = 1;
+            saveCandidates();
+            saveVoters();
+            printf("OK\n");
+            return;
+        }
+        c2 = c2->next;
+    }
+    printf("CANDIDATE_NOT_FOUND\n");
+}
+
+void print_help() {
+    printf("CLI usage:\n");
+    printf("--list-candidates\n--add-candidate <id> <name>\n--list-voters\n--add-voter <id> <name>\n--set-position <name>\n--view-results\n--declare-result\n--reset-election\n--undo\n--cast-vote <voterid> <candidateid>\n--auth-admin <password>\n");
+}
+
+// ================= MAIN (CLI + fallback interactive) ================= //
+int main(int argc, char *argv[]) {
+    loadCandidates();
+    loadVoters();
+    loadPosition();
+    loadResultFromFile();
+
+    if (argc > 1) {
+        const char *cmd = argv[1];
+        if (strcmp(cmd, "--list-candidates") == 0) {
+            list_candidates_cli();
+        } else if (strcmp(cmd, "--add-candidate") == 0 && argc >= 4) {
+            int id = atoi(argv[2]);
+            add_candidate_cli(id, argv[3]);
+        } else if (strcmp(cmd, "--list-voters") == 0) {
+            list_voters_cli();
+        } else if (strcmp(cmd, "--add-voter") == 0 && argc >= 4) {
+            int id = atoi(argv[2]);
+            add_voter_cli(id, argv[3]);
+        } else if (strcmp(cmd, "--set-position") == 0 && argc >= 3) {
+            set_position_cli(argv[2]);
+        } else if (strcmp(cmd, "--view-results") == 0) {
+            view_results_cli();
+        } else if (strcmp(cmd, "--declare-result") == 0) {
+            declare_result_cli();
+        } else if (strcmp(cmd, "--reset-election") == 0) {
+            reset_election_cli();
+        } else if (strcmp(cmd, "--undo") == 0) {
+            undo_cli();
+        } else if (strcmp(cmd, "--cast-vote") == 0 && argc >= 4) {
+            int vid = atoi(argv[2]);
+            int cid = atoi(argv[3]);
+            cast_vote_cli(vid, cid);
+        } else if (strcmp(cmd, "--auth-admin") == 0 && argc >= 3) {
+            if (strcmp(argv[2], ADMIN_PASS) == 0) printf("OK\n"); else printf("ERR\n");
+        } else {
+            print_help();
+        }
+        // cleanup and exit
+        freeCandidates();
+        freeVoters();
+        while (top) { Stack *tmp = top; top = top->next; free(tmp); }
+        return 0;
+    }
+
+    // No args -> fallback to interactive mode (original behavior)
+    // Very small interactive menu kept for backward compatibility
+    int choice;
+    do {
+        printf("\n===== E-VOTING SYSTEM =====\n");
+        printf("1. Admin Login\n2. Voter Login\n3. Exit\n");
+        printf("Enter choice: ");
+        if (scanf("%d", &choice) != 1) break;
+        switch (choice) {
+            case 1: {
+                char password[64];
+                printf("Enter Admin Password: ");
+                scanf("%63s", password);
+                if (strcmp(password, ADMIN_PASS) == 0) {
+                    // expanded admin menu to include full options
+                    int a;
+                    do {
+                        printf("\n--- ADMIN MENU ---\n");
+                        printf("1. Add Candidate\n");
+                        printf("2. View Candidates\n");
+                        printf("3. Add Voter\n");
+                        printf("4. View Voters\n");
+                        printf("5. Undo Last Action\n");
+                        printf("6. Declare Result\n");
+                        printf("7. View Results\n");
+                        printf("8. Set Position\n");
+                        printf("9. Reset Election (remove candidates)\n");
+                        printf("10. Back\n");
+                        printf("Enter choice: ");
+                        if (scanf("%d", &a) != 1) { while(getchar()!='\n'); a = 10; }
+                        switch (a) {
+                            case 1: {
+                                int id; char name[50];
+                                printf("ID: "); if (scanf("%d", &id) != 1) { while(getchar()!='\n'); break; }
+                                printf("Name (no spaces): "); if (scanf("%49s", name) != 1) { while(getchar()!='\n'); break; }
+                                add_candidate_cli(id, name);
+                                break;
+                            }
+                            case 2:
+                                list_candidates_cli();
+                                break;
+                            case 3: {
+                                int id; char name[50];
+                                printf("ID: "); if (scanf("%d", &id) != 1) { while(getchar()!='\n'); break; }
+                                printf("Name (no spaces): "); if (scanf("%49s", name) != 1) { while(getchar()!='\n'); break; }
+                                add_voter_cli(id, name);
+                                break;
+                            }
+                            case 4:
+                                list_voters_cli();
+                                break;
+                            case 5:
+                                undo_cli();
+                                break;
+                            case 6:
+                                if (!headCandidate) {
+                                    printf("No candidates to declare result for.\n");
+                                } else if (!any_voted()) {
+                                    printf("No votes have been cast; cannot declare a winner yet.\n");
+                                } else {
+                                    compute_winner_and_save();
+                                    printf("Result declared: Winner is %s with %d votes.\n", resultWinnerName, resultWinnerVotes);
+                                }
+                                break;
+                            case 7:
+                                view_results_cli();
+                                break;
+                            case 8: {
+                                char pos[100];
+                                printf("Position Name (no spaces): "); if (scanf("%99s", pos) != 1) { while(getchar()!='\n'); break; }
+                                set_position_cli(pos);
+                                break;
+                            }
+                            case 9: {
+                                char resp[8];
+                                printf("This will REMOVE all candidates, reset voters' vote status and clear declared result. Continue? (y/n): ");
+                                if (scanf("%7s", resp) != 1) { printf("Abort.\n"); break; }
+                                if (resp[0] == 'y' || resp[0] == 'Y') {
+                                    reset_election_cli();
+                                    printf("Election reset.\n");
+                                } else {
+                                    printf("Reset cancelled.\n");
+                                }
+                                break;
+                            }
+                            case 10:
+                                break;
+                            default:
+                                printf("Invalid choice!\n");
+                        }
+                    } while (a != 10);
+                } else printf("Incorrect password!\n");
+                break;
+            }
+            case 2: {
+                int vchoice;
+                do {
+                    printf("\n1.Cast Vote 2.Back\nEnter: ");
+                    if (scanf("%d", &vchoice) != 1) break;
+                    if (vchoice == 1) {
+                        int vid, cid;
+                        printf("Voter ID: "); scanf("%d", &vid);
+                        printf("Candidate ID: "); scanf("%d", &cid);
+                        cast_vote_cli(vid, cid);
+                    }
+                } while (vchoice != 2);
+                break;
+            }
+            case 3: break;
+            default: printf("Invalid choice!\n");
+        }
+    } while (choice != 3);
+
+    saveCandidates();
+    saveVoters();
+    savePosition();
+    /* result file already persisted when declared */
+    freeCandidates();
+    freeVoters();
+    while (top) { Stack *tmp = top; top = top->next; free(tmp); }
+    return 0;
+}
