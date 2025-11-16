@@ -1,0 +1,24 @@
+/* collect into array */
+int count = 0;
+for (Candidate *p = headCandidate; p; p = p->next) count++;
+
+Candidate **arr = (Candidate **)malloc(sizeof(Candidate*) * count);
+
+int idx = 0;
+for (Candidate *p = headCandidate; p; p = p->next)
+    arr[idx++] = p;
+
+/* bubble sort by votes (descending) */
+for (int i = 0; i < count - 1; ++i)
+    for (int j = 0; j < count - i - 1; ++j)
+        if (arr[j]->votes < arr[j+1]->votes) {
+            Candidate *t = arr[j];
+            arr[j] = arr[j+1];
+            arr[j+1] = t;
+        }
+
+/* print sorted candidates */
+for (int i = 0; i < count; ++i)
+    printf("%d|%s|%d\n", i+1, arr[i]->name, arr[i]->votes);
+
+free(arr);
