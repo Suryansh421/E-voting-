@@ -1,0 +1,157 @@
+import tkinter as tk
+from tkinter import messagebox
+import threading
+import admin_connect as backend
+
+class VoterDashboard:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Voter Dashboard | E-Voting System")
+        self.root.geometry("950x600")
+        self.root.config(bg="#f4f7f8")
+
+        header = tk.Frame(self.root, bg="#0f4c75", height=70)
+        header.pack(fill="x")
+        tk.Label(header, text="E-Voting Voter Dashboard",
+                 font=("Segoe UI", 20, "bold"), bg="#0f4c75", fg="white").pack(pady=15)
+
+        sidebar = tk.Frame(self.root, bg="#1b262c", width=230)
+        sidebar.pack(side="left", fill="y")
+
+        buttons = [
+            ("🗳 Cast Vote", self.cast_vote),
+            ("📋 View Candidates", self.view_candidates),
+            ("🚪 Exit", self.exit_app)
+        ]
+
+        for text, cmd in buttons:
+            tk.Button(sidebar, text=text, command=cmd, font=("Segoe UI", 12),
+                      bg="#1b262c", fg="#bbe1fa", activebackground="#3282b8",
+                      activeforeground="white", relief="flat", bd=0,
+                      width=20, pady=10).pack(pady=5)
+
+        self.main_frame = tk.Frame(self.root, bg="#f4f7f8")
+        self.main_frame.pack(fill="both", expand=True)
+
+        self.show_welcome()
+
+    def clear_frame(self):
+        for w in self.main_frame.winfo_children():
+            w.destroy()
+
+    def show_welcome(self):
+        self.clear_frame()
+        tk.Label(self.main_frame, text="Welcome, Voter 🗳",
+                 font=("Segoe UI", 22, "bold"), fg="#0f4c75", bg="#f4f7f8").pack(pady=40)
+        tk.Label(self.main_frame, text="Select an option from the left menu to continue.",
+                 font=("Segoe UI", 13), fg="#555", bg="#f4f7f8").pack(pady=10)
+
+    def cast_vote(self):
+        self.clear_frame()
+        tk.Label(self.main_frame, text="Cast Your Vote", font=("Segoe UI", 18, "bold"),
+                 fg="#0f4c75", bg="#f4f7f8").pack(pady=20)
+
+        info_frame = tk.Frame(self.main_frame, bg="#f4f7f8")
+        info_frame.pack(pady=8)
+        tk.Label(info_frame, text="Enter your Voter ID:", font=("Segoe UI", 12), bg="#f4f7f8").grid(row=0, column=0, sticky="e", padx=5)
+        voter_id_entry = tk.Entry(info_frame, font=("Segoe UI", 12), width=20)
+        voter_id_entry.grid(row=0, column=1, padx=5)
+
+        candidates_frame = tk.Frame(self.main_frame, bg="white", padx=20, pady=12, relief="groove", bd=1)
+        candidates_frame.pack(pady=10, fill="x", padx=20)
+
+        status = tk.Label(candidates_frame, text="Loading candidates...", bg="white")
+        status.pack(anchor="w")
+
+        radio_var = tk.StringVar(value="")
+
+        def load_candidates():
+            try:
+                items = backend.list_candidates()
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+                self.root.after(0, lambda: status.config(text="Failed to load candidates"))
+                return
+            def update():
+                if not items:
+                    status.config(text="No candidates available")
+                    return
+                status.config(text=f"{len(items)} candidate(s) available")
+                for it in items:
+                    label = f"{it['name']} (ID: {it['id']})  Votes: {it.get('votes', '0')}"
+                    tk.Radiobutton(candidates_frame, text=label, variable=radio_var, value=str(it['id']),
+                                   font=("Segoe UI", 12), bg="white").pack(anchor="w", pady=3)
+            self.root.after(0, update)
+
+        threading.Thread(target=load_candidates, daemon=True).start()
+
+        def submit_vote():
+            vid = voter_id_entry.get().strip()
+            cid = radio_var.get().strip()
+            if not vid:
+                messagebox.showwarning("Warning", "Please enter your Voter ID.")
+                return
+            if not cid:
+                messagebox.showwarning("Warning", "Please select a candidate.")
+                return
+            def worker():
+                try:
+                    code, out = backend.cast_vote(int(vid), int(cid))
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+                    return
+                if code == 0:
+                    self.root.after(0, lambda: messagebox.showinfo("Success", out or "Vote recorded"))
+                    self.root.after(0, self.show_welcome)
+                else:
+                    self.root.after(0, lambda: messagebox.showerror("Error", out or "Failed to cast vote"))
+            threading.Thread(target=worker, daemon=True).start()
+
+        tk.Button(self.main_frame, text="Submit Vote", command=submit_vote, font=("Segoe UI", 12, "bold"),
+                  bg="#0f4c75", fg="white", relief="flat", width=18, pady=6).pack(pady=12)
+
+    def view_candidates(self):
+        self.clear_frame()
+        tk.Label(self.main_frame, text="View Candidates", font=("Segoe UI", 18, "bold"),
+                 fg="#0f4c75", bg="#f4f7f8").pack(pady=20)
+
+        container = tk.Frame(self.main_frame, bg="white", padx=10, pady=10, relief="groove", bd=1)
+        container.pack(fill="both", expand=True, padx=20, pady=10)
+
+        status = tk.Label(container, text="Loading...", bg="white", fg="#333", font=("Segoe UI", 11))
+        status.pack(anchor="w")
+
+        list_frame = tk.Frame(container, bg="white")
+        list_frame.pack(fill="both", expand=True, pady=8)
+
+        def worker():
+            try:
+                items = backend.list_candidates()
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+                self.root.after(0, lambda: status.config(text="Failed to load"))
+                return
+            def update():
+                status.config(text=f"{len(items)} candidate(s)")
+                for it in items:
+                    tk.Label(list_frame, text=f"ID: {it['id']}    Name: {it['name']}    Votes: {it['votes']}",
+                             font=("Segoe UI", 12), bg="white", fg="#222").pack(anchor="w", pady=4)
+            self.root.after(0, update)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def exit_app(self):
+        confirm = messagebox.askyesno("Exit", "Are you sure you want to exit?")
+        if confirm:
+            self.root.destroy()
+            try:
+                import login_page
+                login_page.main()
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = VoterDashboard(root)
+    root.mainloop()
